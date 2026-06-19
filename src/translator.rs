@@ -57,6 +57,10 @@ impl CharacterDefinition {
         self.0.get(from)
     }
 
+    pub fn contains(&self, from: char) -> bool {
+        self.0.contains_key(&from)
+    }
+
     fn resolve_implicit_dots(&self, chars: &str) -> Result<String, TranslationError> {
         chars
             .chars()

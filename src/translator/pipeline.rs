@@ -1,11 +1,39 @@
+use unicode_normalization::char::compose;
+
 use crate::{
     Direction,
     parser::{AnchoredRule, HasDirection, Rule},
     translator::{
-        ResolvedTranslation, TranslationError, TranslationStage,
+        CharacterDefinition, ResolvedTranslation, TranslationError, TranslationStage,
         table::{TableContext, multipass::MultipassTable, primary::PrimaryTable},
     },
 };
+
+/// Precompose base + combining-mark sequences (`a` + U+0300 → `à`), but only
+/// when the result is a character the table defines. Undefined combinations
+/// stay decomposed so the mark can translate on its own (as in IPA, where
+/// diacritics get their own cells); this is why we compose against the table
+/// instead of applying full NFC.
+fn precompose(input: &str, defined: &CharacterDefinition) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut starter: Option<char> = None;
+    for c in input.chars() {
+        match starter {
+            Some(s) => match compose(s, c) {
+                Some(composed) if defined.contains(composed) => starter = Some(composed),
+                _ => {
+                    result.push(s);
+                    starter = Some(c);
+                }
+            },
+            None => starter = Some(c),
+        }
+    }
+    if let Some(s) = starter {
+        result.push(s);
+    }
+    result
+}
 
 #[derive(Debug)]
 pub enum Transformation {
@@ -35,11 +63,15 @@ impl Transformation {
 #[derive(Debug)]
 pub struct TranslationPipeline {
     steps: Vec<Transformation>,
+    /// Characters defined by the table; used to decide which base + combining
+    /// mark sequences to precompose before translation
+    defined_characters: CharacterDefinition,
 }
 
 impl TranslationPipeline {
     pub fn compile(rules: &[AnchoredRule], direction: Direction) -> Result<Self, TranslationError> {
         let ctx = TableContext::compile(rules)?;
+        let defined_characters = ctx.character_definitions().clone();
         let mut steps = Vec::new();
 
         // ignore rules that aren't meant for the given direction
@@ -98,15 +130,19 @@ impl TranslationPipeline {
             steps.push(Transformation::Post(transform));
         }
         match direction {
-            Direction::Forward => Ok(Self { steps }),
+            Direction::Forward => Ok(Self {
+                steps,
+                defined_characters,
+            }),
             Direction::Backward => Ok(Self {
                 steps: steps.into_iter().rev().collect(),
+                defined_characters,
             }),
         }
     }
 
     pub fn trace(&self, input: &str) -> Vec<Vec<ResolvedTranslation>> {
-        let mut input = input.to_string();
+        let mut input = precompose(input, &self.defined_characters);
         let mut result: Vec<Vec<ResolvedTranslation>> = Vec::new();
         for step in &self.steps {
             let translations = step.trace(&input);
@@ -117,7 +153,7 @@ impl TranslationPipeline {
     }
 
     pub fn translate(&self, input: &str) -> String {
-        let mut result = input.to_string();
+        let mut result = precompose(input, &self.defined_characters);
         for step in &self.steps {
             result = step.translate(&result);
         }
